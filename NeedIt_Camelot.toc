@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: NeedIt
+## Notes: Hover any gear, weapon or trinket to see if you should NEED, GREED or PASS based on your class and spec.
+## Author: Davis
+## Version: 0.1.0
+## SavedVariables: NeedItDB
+
+NeedIt.lua
