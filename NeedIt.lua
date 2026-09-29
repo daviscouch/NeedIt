@@ -69,9 +69,18 @@ local SLOTS = {
 ---------------------------------------------------------------------------
 local function PlayerClass() local _, token = UnitClass("player") return token end
 
+-- manual spec overrides are stored per character (name-realm), not account-wide
+local function CharKey() return (UnitName("player") or "?") .. "-" .. (GetRealmName() or "?") end
+local function GetOverride() return NeedItDB.chars and NeedItDB.chars[CharKey()] end
+local function SetOverride(n)
+  NeedItDB.chars = NeedItDB.chars or {}
+  NeedItDB.chars[CharKey()] = n
+end
+
 -- returns index, isModernSpecAPI
 local function DetectSpec()
-  if NeedItDB.spec then return NeedItDB.spec, (GetSpecialization ~= nil) end
+  local manual = GetOverride()
+  if manual then return manual, (GetSpecialization ~= nil) end
   if GetSpecialization then
     local ok, i = pcall(GetSpecialization)
     if ok and i then return i, true end
@@ -277,11 +286,11 @@ SlashCmdList["NEEDIT"] = function(msg)
   cmd = cmd:lower()
   if cmd == "spec" then
     local n = tonumber(arg)
-    if n then NeedItDB.spec = n else NeedItDB.spec = nil end
+    SetOverride(n)
   end
   local name = GetSpec()
   Say("Class " .. tostring(PlayerClass()) .. ", spec " .. tostring(name or "unknown")
-      .. (NeedItDB.spec and " (manual)" or " (auto)"))
+      .. (GetOverride() and " (manual)" or " (auto)"))
   Say("Override: /needit spec <number>   Reset: /needit spec auto")
 end
 
