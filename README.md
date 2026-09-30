@@ -63,6 +63,9 @@ Just hover gear. Commands:
 3. **Score:** each stat is weighted for your spec (Strength for Arms, Spell Damage for Frost, and so on),
    plus weapon DPS and weapon-style preferences (daggers for Assassination, two-handers for Arms).
 4. **Compare:** if it scores more than 2% above what you have equipped in that slot, it's **NEED**.
+   For rings, trinkets and dual-wield weapons it compares with the weaker of your two. If one slot is empty,
+   it says how the item compares with the one you already wear. If both are empty, it shows a score so you can
+   compare candidates. Hovering something you're wearing shows **EQUIPPED**.
    Otherwise it's **GREED**.
 
 The weights are rough rules of thumb, not a sim. Trinkets and on-use effects get a flat value, so read those yourself.

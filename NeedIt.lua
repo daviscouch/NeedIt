@@ -95,7 +95,10 @@ local PCT_MULT = 14       -- "+1% crit" is treated as roughly 14 rating points
 local EFFECT_VALUE = 40   -- flat worth of a proc / on-use effect line
 local PCT_STATS = set("CRIT","HIT","DODGE","PARRY","BLOCK","HASTE")
 
-local COLORS = { NEED="|cff33ff33", GREED="|cffffd100", PASS="|cffff4040", GRAY="|cffaaaaaa" }
+local COLORS = { NEED="|cff33ff33", GREED="|cffffd100", PASS="|cffff4040", EQUIPPED="|cff66bbff", GRAY="|cffaaaaaa" }
+
+-- What a two-slot item is called in "vs your other ring"
+local SLOT_NOUN = { INVTYPE_FINGER = "ring", INVTYPE_TRINKET = "trinket", INVTYPE_WEAPON = "weapon" }
 
 ---------------------------------------------------------------------------
 -- Per-character data (spec override, ignore list, wanted list)
@@ -404,7 +407,7 @@ local function ParseItem(link)
   local lines = TooltipLines(link)
   if not lines then return nil end
 
-  local vals, dps, classLine = {}, 0, nil
+  local vals, dps, classLine, unique = {}, 0, nil, nil
   if GetStats then
     local okS, stats = pcall(GetStats, link)
     if okS and type(stats) == "table" then
@@ -419,8 +422,10 @@ local function ParseItem(link)
     local d = text:lower():match("([%d%.]+)%s+damage per second")
     if d then dps = tonumber(d) or dps end
     if text:find("^Classes:") then classLine = text:upper() end
+    if text:find("^Unique%-Equipped") then unique = "equipped"
+    elseif text:find("^Unique") then unique = unique or "unique" end
   end
-  local parsed = { vals = vals, dps = dps, classLine = classLine }
+  local parsed = { vals = vals, dps = dps, classLine = classLine, unique = unique }
   parsedCache[link] = parsed
   return parsed
 end
@@ -480,6 +485,8 @@ local function ItemScore(link, spec)
   return score * mult
 end
 
+local function ItemID(link) return tonumber(link and link:match("item:(%d+)")) end
+
 local function SlotScore(slot, spec)
   local l = GetInventoryItemLink("player", slot)
   if not l then return 0 end
@@ -502,25 +509,46 @@ local function OffHandIsWeaponSlot()
   return classID == 2
 end
 
--- Score of what you currently wear in the slot(s) this item would replace (worst slot wins)
-local function EquippedScore(equipLoc, spec)
+-- Score of what you currently wear in the slot(s) this item would replace (worst slot wins), plus
+-- info = { slots = n, empty = n, lowestEmpty = bool, bestFilled = score|nil, sameSlot = slot|nil }
+local function EquippedScore(equipLoc, spec, itemID)
   local slots = SLOTS[equipLoc]
   if not slots then return nil end
   -- A two-hander replaces main hand AND off hand
-  if equipLoc == "INVTYPE_2HWEAPON" then return SlotScore(16, spec) + SlotScore(17, spec) end
+  if equipLoc == "INVTYPE_2HWEAPON" then
+    local mh, oh = GetInventoryItemLink("player", 16), GetInventoryItemLink("player", 17)
+    return SlotScore(16, spec) + SlotScore(17, spec), { slots = 1, empty = 0, lowestEmpty = not mh and not oh }
+  end
   -- A one-hander only competes for the off hand if you can dual wield and aren't using a shield/held item
   if equipLoc == "INVTYPE_WEAPON" and not (PlayerDualWields() and OffHandIsWeaponSlot()) then
     slots = { 16 }
   end
+  local info = { slots = #slots, empty = 0 }
   local lowest
   for _, s in ipairs(slots) do
-    local sc = SlotScore(s, spec)
-    if not lowest or sc < lowest then lowest = sc end
+    local l = GetInventoryItemLink("player", s)
+    local sc = l and (ItemScore(l, spec) or 0) or 0
+    if l then
+      if itemID and ItemID(l) == itemID then info.sameSlot = s end
+      if not info.bestFilled or sc > info.bestFilled then info.bestFilled = sc end
+    else
+      info.empty = info.empty + 1
+    end
+    if not lowest or sc < lowest or (sc == lowest and not l) then lowest, info.lowestEmpty = sc, not l end
   end
-  return lowest
+  return lowest, info
 end
 
-local function ItemID(link) return tonumber(link and link:match("item:(%d+)")) end
+-- Tooltip for an item in one of your character-sheet slots? Returns that slot id.
+local function HoveredSlot(tt)
+  if not tt or not tt.GetOwner then return end
+  local ok, owner = pcall(tt.GetOwner, tt)
+  if not ok or type(owner) ~= "table" or not owner.GetName or not owner.GetID then return end
+  local name = owner:GetName()
+  if type(name) == "string" and name:find("^Character%w+Slot$") then return owner:GetID() end
+end
+
+
 
 local function FormatGood(good, n)
   local out = {}
@@ -540,7 +568,8 @@ end
 ---------------------------------------------------------------------------
 -- Verdict: returns verdict ("NEED"/"GREED"/"PASS"), headline, detail (may be nil)
 ---------------------------------------------------------------------------
-local function Evaluate(link)
+-- hoverSlot: the character-sheet slot this tooltip is for (you're wearing it), if any
+local function Evaluate(link, hoverSlot)
   local class = PlayerClass()
   if not class or not link then return end
   local _, _, _, equipLoc, _, classID, subID = GetInstant(link)
@@ -590,17 +619,41 @@ local function Evaluate(link)
   if spec.source == "default" then detail[#detail + 1] = "No talents yet - assuming " .. spec.name end
   local detailText = #detail > 0 and table.concat(detail, "  |  ") or nil
 
+  if hoverSlot then
+    if score > 0 then return "EQUIPPED", "You're wearing this", detailText end
+    return "EQUIPPED", "You're wearing this, but it has nothing " .. spec.name .. " uses", detailText
+  end
+
   if score <= 0 then
     if #wasted > 0 then return "PASS", "Wrong stats for " .. spec.name, detailText end
     return "GREED", "No clear stats for " .. spec.name .. " - check the effect", detailText
   end
 
-  local eq = EquippedScore(equipLoc, spec) or 0
+  local eq, info = EquippedScore(equipLoc, spec, id)
+  eq, info = eq or 0, info or { slots = 1, empty = 0 }
+  local noun = SLOT_NOUN[equipLoc] or "item"
+  -- Can't wear two of a unique item, so it only competes with the copy you already wear
+  if info.sameSlot and info.slots > 1 and parsed.unique then
+    if parsed.unique == "unique" then return "PASS", "Unique - you already have one", detailText end
+    return "GREED", "Unique-Equipped - you already wear one", detailText
+  end
+
+  local function pctVs(other)
+    local pct = math.floor((score / other - 1) * 100 + 0.5)
+    return (pct >= 0 and "+" or "") .. pct .. "%"
+  end
   local upgrade = score > eq * 1.02
   local gainText
   if eq > 0 then
-    local pct = math.floor((score / eq - 1) * 100 + 0.5)
-    gainText = (pct >= 0 and "+" or "") .. pct .. "% vs equipped"
+    gainText = pctVs(eq) .. " vs equipped"
+  elseif not info.lowestEmpty then
+    gainText = "your current " .. noun .. " has nothing " .. spec.name .. " uses"
+  elseif info.bestFilled and info.bestFilled > 0 then
+    -- One slot empty: this fills it, and here's how it stacks up against the one you wear
+    gainText = "fills empty slot, " .. pctVs(info.bestFilled) .. " vs your other " .. noun
+  elseif info.slots > 1 and info.empty == info.slots then
+    -- Both empty: nothing to compare with, so show a score to compare candidates by
+    gainText = "both slots empty, score " .. math.floor(score + 0.5)
   else
     gainText = "empty slot"
   end
@@ -628,7 +681,7 @@ end
 local function Annotate(tt, link)
   if not tt or not link or tt.__needit == link then return end
   if tt ~= GameTooltip and tt ~= ItemRefTooltip then return end
-  local ok, verdict, headline, detail = pcall(Evaluate, link)
+  local ok, verdict, headline, detail = pcall(Evaluate, link, HoveredSlot(tt))
   if not ok or not verdict then return end
   tt.__needit = link
   tt:AddLine(" ")

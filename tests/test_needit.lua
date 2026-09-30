@@ -17,6 +17,11 @@ local ITEMS = {
   axe1h      = { "INVTYPE_WEAPON",   2, 0,  { ITEM_MOD_AGILITY_SHORT = 5 },    { "Axe", "20.0 damage per second" } },
   rapRing    = { "INVTYPE_FINGER",   4, 0,  {}, { "Ring", "Equip: +30 ranged Attack Power." } },
   feralStaff = { "INVTYPE_2HWEAPON", 2, 10, {}, { "Staff", "10.0 damage per second", "Equip: Increases attack power by 200 in Cat, Bear, Dire Bear, and Moonkin forms only." } },
+  ringAgi    = { "INVTYPE_FINGER",   4, 0,  { ITEM_MOD_AGILITY_SHORT = 10 }, { "Ring" } },
+  ringAgiLow = { "INVTYPE_FINGER",   4, 0,  { ITEM_MOD_AGILITY_SHORT = 5 },  { "Ring" } },
+  ringUniq   = { "INVTYPE_FINGER",   4, 0,  { ITEM_MOD_AGILITY_SHORT = 8 },  { "Unique-Equipped", "Ring" } },
+  ringSpi    = { "INVTYPE_FINGER",   4, 0,  { ITEM_MOD_SPIRIT_SHORT = 10 },  { "Ring" } },
+  trinketAP  = { "INVTYPE_TRINKET",  4, 0,  {}, { "Trinket", "Equip: +20 Attack Power." } },
   libram     = { "INVTYPE_RELIC",    4, 7,  { ITEM_MOD_INTELLECT_SHORT = 3 }, { "Libram" } },
   clothChest = { "INVTYPE_CHEST",    4, 1,  { ITEM_MOD_INTELLECT_SHORT = 5, ITEM_MOD_SPIRIT_SHORT = 5 }, { "Cloth" } },
 }
@@ -69,26 +74,33 @@ local function reset(s)
   if s.tooltipInfo then
     C_TooltipInfo = { GetHyperlink = function(link)
       local lines = { { leftText = "Name" } }
-      for _, l in ipairs(ITEMS[link][5]) do lines[#lines + 1] = { leftText = l } end
+      for _, l in ipairs(ITEMS[N(link)][5]) do lines[#lines + 1] = { leftText = l } end
       return { lines = lines }
     end }
   end
 end
 
-function GetItemInfoInstant(link) local i = ITEMS[link] return 1, "", "", i[1], 0, i[2], i[3] end
-function GetItemStats(link) return ITEMS[link][4] end
+local ids, nextID = {}, 1000
+for name in pairs(ITEMS) do ids[name] = nextID nextID = nextID + 1 end
+local realLink = {}
+for name, id in pairs(ids) do realLink["item:" .. id] = name end
+local function L(name) return "item:" .. ids[name] end   -- link for an item name
+local function N(link) return realLink[link] or link end  -- item name for a link
+function GetItemInfoInstant(link)
+  link = N(link) local i = ITEMS[link] return 1, "", "", i[1], 0, i[2], i[3] end
+function GetItemStats(link) return ITEMS[N(link)][4] end
 function UnitClass() return state.class:sub(1,1) .. state.class:sub(2):lower(), state.class end
 function UnitName() return "Tester" end
 function GetRealmName() return "Realm" end
 function UnitLevel() return state.level end
-function GetInventoryItemLink(_, slot) return state.equipped[slot] end
+function GetInventoryItemLink(_, slot) return state.equipped[slot] and L(state.equipped[slot]) end
 function GetNumTalentTabs() return 3 end
 function GetTalentTabInfo(i) return "Tree" .. i, "icon", (state.talents or {0,0,0})[i], "file" end
 function CanDualWield() return state.dualWield end
 local printed = {}
 function print(m) printed[#printed + 1] = m end
 function GetBuildInfo() return "1.60.1", "70058", "Sep 2026", 16001 end
-function GetContainerItemLink(bag, slot) return state.bags and state.bags[slot] end
+function GetContainerItemLink(bag, slot) return state.bags and state.bags[slot] and L(state.bags[slot]) end
 local bagButtons = {}
 local function newButton(id)
   local b = { id = id }
@@ -120,7 +132,7 @@ function CreateFrame(kind, name)
     function tip:ClearLines() self.lines = {} end
     function tip:SetHyperlink(link)
       self.lines = { "Name" }
-      for _, l in ipairs(ITEMS[link][5]) do self.lines[#self.lines + 1] = l end
+      for _, l in ipairs(ITEMS[N(link)][5]) do self.lines[#self.lines + 1] = l end
       for i, l in ipairs(self.lines) do _G[name .. "TextLeft" .. i] = { GetText = function() return l end } end
     end
     function tip:NumLines() return #self.lines end
@@ -144,7 +156,13 @@ local function hover(link)
   eventHandler(nil, "PLAYER_EQUIPMENT_CHANGED") -- invalidate caches between scenarios
   NeedItDB.chars = nil
   GameTooltip.lines, GameTooltip.__needit = {}, nil
-  postCall(GameTooltip, { hyperlink = link })
+  GameTooltip.GetOwner = function()
+    if state.hoverSlot then
+      return { GetName = function() return "CharacterFinger0Slot" end, GetID = function() return state.hoverSlot end }
+    end
+    return { GetName = function() return "ContainerFrame1Item1" end, GetID = function() return 1 end }
+  end
+  postCall(GameTooltip, { hyperlink = L(link) })
   return strip(table.concat(GameTooltip.lines, " / "))
 end
 
@@ -234,7 +252,7 @@ check("C_TooltipInfo path reads stats",
 
 -- WoW Forever talent tree (real capture: 11 points in Beast Mastery)
 check("Forever: real Hunter tree -> Beast Mastery (auto, not leveling default)",
-  { class = "HUNTER", level = 20, dualWield = true, forever = {} }, "rapRing", "Upgrade for Beast Mastery (empty slot) / Good")
+  { class = "HUNTER", level = 20, dualWield = true, forever = {} }, "rapRing", "Upgrade for Beast Mastery (both slots empty, score 30) / Good")
 check("Forever: points in Marksmanship talents -> Marksmanship",
   { class = "HUNTER", level = 20, dualWield = true, forever = { ranks = { ["Lethal Attacks"] = 5, ["Efficiency"] = 5, ["Deadly Aspects"] = 1 } } },
   "rapRing", "Upgrade for Marksmanship")
@@ -254,6 +272,28 @@ local okDbg = dbg:find("Talent tree (Forever-style): Beast Mastery 11, Marksmans
 io.write((okDbg and "PASS " or "FAIL ") .. "Forever: /needit debug shows per-tree points\n")
 if not okDbg then io.write(dbg, "\n") end
 if okDbg then pass = pass + 1 else fail = fail + 1 end
+
+-- Two-slot items (rings / trinkets)
+local H = { class = "HUNTER", level = 30, talents = {20,0,0}, dualWield = true }
+local function with(t) local s = {} for k, v in pairs(H) do s[k] = v end for k, v in pairs(t) do s[k] = v end return s end
+check("Ring, one slot empty: compares with your other ring (better)",
+  with({ equipped = { [11] = "ringAgiLow" } }), "ringAgi", "NEED  Upgrade for Beast Mastery (fills empty slot, +100% vs your other ring)")
+check("Ring, one slot empty: compares with your other ring (worse, still NEED)",
+  with({ equipped = { [11] = "ringAgi" } }), "ringAgiLow", "NEED  Upgrade for Beast Mastery (fills empty slot, -50% vs your other ring)")
+check("Ring, both slots empty: shows a score",
+  with({ equipped = {} }), "ringAgi", "(both slots empty, score 20)")
+check("Ring, both slots full: vs the weaker one",
+  with({ equipped = { [11] = "ringAgi", [12] = "ringAgiLow" } }), "ringAgi", "(+100% vs equipped)")
+check("Hovering the ring you're wearing (other slot empty) is not 'NEED empty slot'",
+  with({ equipped = { [11] = "ringAgi" }, hoverSlot = 11 }), "ringAgi", "EQUIPPED  You're wearing this")
+check("Bag copy of a worn Unique-Equipped ring",
+  with({ equipped = { [11] = "ringUniq" } }), "ringUniq", "GREED  Unique-Equipped - you already wear one")
+check("Bag copy of a worn non-unique ring can fill the other slot",
+  with({ equipped = { [11] = "ringAgi" } }), "ringAgi", "(fills empty slot, +0% vs your other ring)")
+check("Worn ring has no useful stats: says so instead of 'empty slot'",
+  with({ equipped = { [11] = "ringSpi", [12] = "ringSpi" } }), "ringAgi", "your current ring has nothing Beast Mastery uses")
+check("Trinket, one slot empty: vs your other trinket",
+  with({ equipped = { [13] = "trinketAP" } }), "trinketAP", "(fills empty slot, +0% vs your other trinket)")
 
 -- event-driven bag markers
 reset({ class = "WARRIOR", level = 30, talents = {20,0,0}, dualWield = true, bags = { "plateChest", "mailChest", "clothChest" } })
