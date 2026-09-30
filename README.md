@@ -57,7 +57,8 @@ Just hover gear. Commands:
 
 1. **Can you use it?** Checks armor type (mail and plate need level 40), weapon types, shields,
    relics and "Classes:" restrictions. If you can't use it, the verdict is **PASS**.
-2. **Your spec:** read from your talents. Before level 10 it assumes a common leveling spec,
+2. **Your spec:** the tree with the most talent points (on WoW Forever, from the Beast Mastery / Marksmanship / Survival
+   sections of the single talent window). Before level 10 it assumes a common leveling spec,
    and `/needit spec` overrides it.
 3. **Score:** each stat is weighted for your spec (Strength for Arms, Spell Damage for Frost, and so on),
    plus weapon DPS and weapon-style preferences (daggers for Assassination, two-handers for Arms).

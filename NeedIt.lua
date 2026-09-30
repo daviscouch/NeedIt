@@ -157,6 +157,72 @@ local function TalentTab(i)
   return r[3], r[6]
 end
 
+-- WoW Forever puts all three Classic trees side by side in ONE modern talent tree (C_Traits).
+-- Every node carries a group ID for the Classic tree it belongs to (the group most nodes share),
+-- so: group nodes by that ID, order the groups left to right, and add up points per group.
+-- Returns { {points=n}, ... } in Classic tree order, or nil if this client doesn't work that way.
+local function TraitTrees()
+  local CT, TR = C_ClassTalents, C_Traits
+  if not (CT and TR and CT.GetActiveConfigID and TR.GetConfigInfo and TR.GetTreeNodes and TR.GetNodeInfo) then return end
+  local okC, configID = pcall(CT.GetActiveConfigID)
+  if not okC or not configID then return end
+  local okI, cfg = pcall(TR.GetConfigInfo, configID)
+  if not okI or type(cfg) ~= "table" or type(cfg.treeIDs) ~= "table" then return end
+  local nodes, groupCount = {}, {}
+  for _, treeID in ipairs(cfg.treeIDs) do
+    local okN, ids = pcall(TR.GetTreeNodes, treeID)
+    for _, nodeID in ipairs((okN and type(ids) == "table") and ids or {}) do
+      local ok, n = pcall(TR.GetNodeInfo, configID, nodeID)
+      if ok and type(n) == "table" and n.isVisible ~= false and type(n.groupIDs) == "table" then
+        nodes[#nodes + 1] = n
+        for _, g in ipairs(n.groupIDs) do groupCount[g] = (groupCount[g] or 0) + 1 end
+      end
+    end
+  end
+  local byGroup, trees = {}, {}
+  for _, n in ipairs(nodes) do
+    local best
+    for _, g in ipairs(n.groupIDs) do
+      if not best or groupCount[g] > groupCount[best] or (groupCount[g] == groupCount[best] and g < best) then best = g end
+    end
+    if best then
+      local t = byGroup[best]
+      if not t then t = { points = 0, sumX = 0, n = 0 } byGroup[best] = t trees[#trees + 1] = t end
+      t.points = t.points + (tonumber(n.ranksPurchased) or tonumber(n.currentRank) or 0)
+      t.sumX = t.sumX + (tonumber(n.posX) or 0)
+      t.n = t.n + 1
+    end
+  end
+  if #trees < 2 then return end
+  table.sort(trees, function(a, b) return a.sumX / a.n < b.sumX / b.n end)
+  return trees
+end
+
+-- Modern spec API: global on some clients, C_SpecializationInfo on others.
+-- Returns index, name, number of specs for the class
+local function ModernSpec()
+  local SI = C_SpecializationInfo or {}
+  local getSpec = GetSpecialization or SI.GetSpecialization
+  if not getSpec then return end
+  local ok, i = pcall(getSpec)
+  if not ok or type(i) ~= "number" or i <= 0 then return end
+  local name
+  local getInfo = GetSpecializationInfo or SI.GetSpecializationInfo
+  if getInfo then
+    local ok2, _, n = pcall(getInfo, i)
+    if ok2 then name = n end
+  end
+  local count
+  if GetNumSpecializations then
+    local ok3, c = pcall(GetNumSpecializations)
+    if ok3 then count = c end
+  elseif SI.GetNumSpecializationsForClassID then
+    local ok3, c = pcall(SI.GetNumSpecializationsForClassID, select(3, UnitClass("player")))
+    if ok3 then count = c end
+  end
+  return i, name, count
+end
+
 -- returns spec entry {name, kind, opts}, source ("manual" | "auto" | "default")
 local function DetectSpec()
   local class = PlayerClass()
@@ -164,42 +230,45 @@ local function DetectSpec()
   if not list then return end
   local manual = CharData().spec
   if manual and list[manual] then return list[manual], "manual" end
-  if GetSpecialization then
-    local ok, i = pcall(GetSpecialization)
-    if ok and type(i) == "number" and i > 0 then
-      local name
-      if GetSpecializationInfo then
-        local ok2, _, n = pcall(GetSpecializationInfo, i)
-        if ok2 then name = n end
-      end
-      local s = SpecByName(class, name) or list[i]
-      if s then return s, "auto" end
-    end
+  -- Real specs (retail-style). WoW Forever has one class-wide spec named after the class, so skip that case.
+  local i, name, count = ModernSpec()
+  if i then
+    local s = SpecByName(class, name) or ((tonumber(count) or 0) > 1 and list[i]) or nil
+    if s then return s, "auto" end
   end
+  -- WoW Forever: Classic trees inside one modern talent tree
+  local classic = SPECS[class] or {}
+  local trees = TraitTrees()
+  if trees and #trees == #classic then
+    local best, bestPts = nil, 0
+    for idx, t in ipairs(trees) do
+      if t.points > bestPts then best, bestPts = idx, t.points end
+    end
+    if best then return classic[best], "auto" end
+  end
+  -- Classic talent tabs
   if GetNumTalentTabs and GetTalentTabInfo then
     local okN, tabs = pcall(GetNumTalentTabs)
     local best, bestName, bestPts = nil, nil, 0
-    for i = 1, (okN and tonumber(tabs)) or 0 do
-      local name, pts = TalentTab(i)
-      if type(pts) == "number" and pts > bestPts then best, bestName, bestPts = i, name, pts end
+    for t = 1, (okN and tonumber(tabs)) or 0 do
+      local tabName, pts = TalentTab(t)
+      if type(pts) == "number" and pts > bestPts then best, bestName, bestPts = t, tabName, pts end
     end
     if best then
-      local s = SpecByName(class, bestName) or (SPECS[class] or {})[best]
+      local s = SpecByName(class, bestName) or classic[best]
       if s then return s, "auto" end
     end
   end
   -- No talent points yet (under level 10): assume the usual leveling spec
-  local def = DEFAULT_SPEC[class] and SPECS[class][DEFAULT_SPEC[class]]
+  local def = DEFAULT_SPEC[class] and classic[DEFAULT_SPEC[class]]
   if def then return def, "default" end
 end
 
 local specCache
 local function GetSpec()
-  local class = PlayerClass()
+  if specCache then return specCache.spec end
   local s, source = DetectSpec()
   if not s then return nil end
-  local key = class .. s[1] .. source
-  if specCache and specCache.key == key then return specCache.spec end
   local kind = KINDS[s[2]]
   local opts = s[3] or {}
   local w = {}
@@ -207,7 +276,8 @@ local function GetSpec()
   if opts.w then for k, v in pairs(opts.w) do w[k] = v end end
   local spec = { name = s[1], kind = s[2], w = w, dpsW = kind.dpsW, rdps = kind.rdps,
                  dagger = opts.dagger, twoHand = opts.twoHand, source = source }
-  specCache = { key = key, spec = spec }
+  -- Talent data may not be loaded yet right after login, so don't lock in a fallback past level 10
+  if source ~= "default" or (UnitLevel("player") or 0) < 10 then specCache = { spec = spec } end
   return spec
 end
 
@@ -776,13 +846,15 @@ local function Debug()
   Say("Level " .. tostring(UnitLevel("player")) .. " " .. tostring(PlayerClass())
       .. ", max armor now: " .. tostring(ARMOR_NAMES[MaxArmor(PlayerClass())])
       .. ", dual wield: " .. tostring(PlayerDualWields()))
-  if GetSpecialization then
-    local ok, i = pcall(GetSpecialization)
-    local name
-    if ok and i and GetSpecializationInfo then local ok2, _, n = pcall(GetSpecializationInfo, i) if ok2 then name = n end end
-    Say("Spec API: GetSpecialization() = " .. tostring(ok and i) .. " (" .. tostring(name) .. ")")
+  local si, sname, scount = ModernSpec()
+  Say("Spec API: " .. (si and (tostring(si) .. " = " .. tostring(sname) .. ", " .. tostring(scount) .. " spec(s) for class") or "none"))
+  local trees = TraitTrees()
+  if trees then
+    local parts, classic = {}, SPECS[PlayerClass()] or {}
+    for idx, t in ipairs(trees) do parts[#parts + 1] = tostring(classic[idx] and classic[idx][1] or ("tree " .. idx)) .. " " .. t.points end
+    Say("Talent tree (Forever-style): " .. table.concat(parts, ", "))
   else
-    Say("Spec API: none")
+    Say("Talent tree (Forever-style): none")
   end
   if GetNumTalentTabs and GetTalentTabInfo then
     local ok, n = pcall(GetNumTalentTabs)
@@ -791,14 +863,15 @@ local function Debug()
       local name, pts = TalentTab(i)
       tabs[#tabs + 1] = tostring(name) .. " " .. tostring(pts)
     end
-    Say("Talent trees: " .. (#tabs > 0 and table.concat(tabs, ", ") or "none"))
+    Say("Talent trees (Classic-style): " .. (#tabs > 0 and table.concat(tabs, ", ") or "none"))
   else
-    Say("Talent trees: API missing")
+    Say("Talent trees (Classic-style): none")
   end
   Status()
   Say("Tooltip data API: " .. ((C_TooltipInfo and "yes") or "no") .. ", tooltip hooks: "
       .. ((TooltipDataProcessor and "modern") or "classic"))
 end
+
 
 local function HandleSpec(cd, rest)
   local r = rest:lower()
@@ -863,7 +936,8 @@ end
 ---------------------------------------------------------------------------
 -- Things that change which verdict an item gets
 local INVALIDATE = set("PLAYER_EQUIPMENT_CHANGED", "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED",
-  "CHARACTER_POINTS_CHANGED", "PLAYER_LEVEL_UP", "PLAYER_SPECIALIZATION_CHANGED", "TRAIT_CONFIG_UPDATED")
+  "CHARACTER_POINTS_CHANGED", "PLAYER_LEVEL_UP", "PLAYER_SPECIALIZATION_CHANGED", "TRAIT_CONFIG_UPDATED", "TRAIT_CONFIG_LIST_UPDATED", "TRAIT_TREE_CHANGED",
+  "PLAYER_ENTERING_WORLD")
 -- Things that change what's on screen (or finish loading item data we were waiting for)
 local REFRESH = set("BAG_UPDATE", "BAG_UPDATE_DELAYED", "MERCHANT_SHOW", "MERCHANT_UPDATE",
   "START_LOOT_ROLL", "GET_ITEM_INFO_RECEIVED")
@@ -877,6 +951,7 @@ for ev in pairs(REFRESH) do pcall(f.RegisterEvent, f, ev) end
 f:SetScript("OnEvent", function(_, event)
   if event == "PLAYER_LOGIN" then
     NeedItDB = NeedItDB or {}
+    NeedItDB.probe = nil   -- left over from 0.4.x debugging builds
     SetupTooltips()
     HookRefreshes()
     Say("loaded. Hover gear to see NEED / GREED / PASS. Type /needit help.")

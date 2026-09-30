@@ -22,11 +22,40 @@ local ITEMS = {
 }
 
 local state
-local MODERN = { "GetSpecialization", "GetSpecializationInfo", "GetNumSpecializations", "C_TooltipInfo" }
+local MODERN = { "GetSpecialization", "GetSpecializationInfo", "GetNumSpecializations", "C_TooltipInfo",
+                 "C_SpecializationInfo", "C_ClassTalents", "C_Traits" }
+local TESTDIR = (arg[0] or ""):match("^(.*[/\\])") or ""
+local FOREVER_HUNTER = dofile(TESTDIR .. "forever_hunter_tree.lua")
+
+-- WoW Forever: one class-wide spec, no Classic talent-tab API, all trees in one C_Traits tree.
+-- s.forever = { [nodeName] = ranks } overrides the captured ranks (nil = use the real capture).
+local function mockForever(s)
+  GetNumTalentTabs, GetTalentTabInfo = nil, nil
+  C_SpecializationInfo = {
+    GetSpecialization = function() return 1 end,
+    GetSpecializationInfo = function() return 1485, s.class:sub(1,1) .. s.class:sub(2):lower() end,
+    GetNumSpecializationsForClassID = function() return 1 end,
+  }
+  C_ClassTalents = { GetActiveConfigID = function() return 539272 end }
+  local byID = {}
+  for _, n in ipairs(FOREVER_HUNTER) do
+    local ranks = n[3]
+    if s.forever.ranks then ranks = s.forever.ranks[n[5]] or 0 end
+    byID[n[1]] = { ID = n[1], posX = n[2], ranksPurchased = ranks, currentRank = ranks, groupIDs = n[4], isVisible = true }
+  end
+  C_Traits = {
+    GetConfigInfo = function() return { ID = 539272, treeIDs = { 1091 } } end,
+    GetTreeNodes = function() local ids = {} for _, n in ipairs(FOREVER_HUNTER) do ids[#ids + 1] = n[1] end return ids end,
+    GetNodeInfo = function(_, id) return byID[id] end,
+  }
+end
+
 local function reset(s)
   state = s
   state.equipped = state.equipped or {}
   for _, k in ipairs(MODERN) do _G[k] = nil end
+  GetNumTalentTabs = function() return 3 end
+  if s.forever then mockForever(s) return end
   if s.modernSpec then  -- retail-style spec API: { index, name, count }
     GetSpecialization = function() return s.modernSpec[1] end
     GetSpecializationInfo = function() return 100, s.modernSpec[2] end
@@ -202,6 +231,29 @@ check("Modern spec API returning bogus index falls back to talents/default",
   { class = "MAGE", level = 5, dualWield = false, modernSpec = { 5, "Initial", 3 } }, "clothChest", "assuming Frost")
 check("C_TooltipInfo path reads stats",
   { class = "HUNTER", level = 30, talents = {20,0,0}, dualWield = true, tooltipInfo = true }, "rapRing", "+30 Ranged Attack Power")
+
+-- WoW Forever talent tree (real capture: 11 points in Beast Mastery)
+check("Forever: real Hunter tree -> Beast Mastery (auto, not leveling default)",
+  { class = "HUNTER", level = 20, dualWield = true, forever = {} }, "rapRing", "Upgrade for Beast Mastery (empty slot) / Good")
+check("Forever: points in Marksmanship talents -> Marksmanship",
+  { class = "HUNTER", level = 20, dualWield = true, forever = { ranks = { ["Lethal Attacks"] = 5, ["Efficiency"] = 5, ["Deadly Aspects"] = 1 } } },
+  "rapRing", "Upgrade for Marksmanship")
+check("Forever: points in Survival talents -> Survival",
+  { class = "HUNTER", level = 20, dualWield = true, forever = { ranks = { ["Deflection"] = 5, ["Surefooted"] = 3 } } },
+  "rapRing", "Upgrade for Survival")
+check("Forever: no points spent at level 5 -> leveling default",
+  { class = "HUNTER", level = 5, dualWield = true, forever = { ranks = {} } },
+  "rapRing", "No talents yet - assuming Beast Mastery")
+reset({ class = "HUNTER", level = 20, dualWield = true, forever = {} })
+eventHandler(nil, "PLAYER_EQUIPMENT_CHANGED")
+printed = {}
+SlashCmdList.NEEDIT("debug")
+local dbg = table.concat(printed, "\n")
+local okDbg = dbg:find("Talent tree (Forever-style): Beast Mastery 11, Marksmanship 0, Survival 0", 1, true)
+  and dbg:find("spec Beast Mastery (auto)", 1, true)
+io.write((okDbg and "PASS " or "FAIL ") .. "Forever: /needit debug shows per-tree points\n")
+if not okDbg then io.write(dbg, "\n") end
+if okDbg then pass = pass + 1 else fail = fail + 1 end
 
 -- event-driven bag markers
 reset({ class = "WARRIOR", level = 30, talents = {20,0,0}, dualWield = true, bags = { "plateChest", "mailChest", "clothChest" } })
