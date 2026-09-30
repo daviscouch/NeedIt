@@ -39,8 +39,23 @@ local SPECS = {
 }
 local DRUID_MODERN = { {"Balance","CASTER"}, {"Feral","FERAL"}, {"Guardian","FERAL"}, {"Restoration","HEALER"} }
 
+-- Spec index to assume before any talent points are spent (typical leveling spec)
+local DEFAULT_SPEC = { WARRIOR=1, PALADIN=3, HUNTER=1, ROGUE=2, PRIEST=3, SHAMAN=2, MAGE=3, WARLOCK=1, DRUID=2 }
+
 -- Highest armor type a class can wear (subclass ids: 1 cloth, 2 leather, 3 mail, 4 plate)
 local ARMOR = { WARRIOR=4, PALADIN=4, HUNTER=3, SHAMAN=3, ROGUE=2, DRUID=2, PRIEST=1, MAGE=1, WARLOCK=1 }
+local ARMOR_NAMES = { "cloth", "leather", "mail", "plate" }
+local ARMOR_LEVEL = 40    -- mail/plate classes wear one tier lower until this level
+
+-- Armor type the player can wear right now
+local function MaxArmor(class)
+  local max = ARMOR[class] or 1
+  if max >= 3 and (UnitLevel("player") or 0) < ARMOR_LEVEL then return max - 1 end
+  return max
+end
+
+-- Classic: only these classes can dual wield (used when CanDualWield() is unavailable)
+local DUAL_WIELD = set("WARRIOR","ROGUE","HUNTER")
 local BODY_SLOTS = set("INVTYPE_HEAD","INVTYPE_SHOULDER","INVTYPE_CHEST","INVTYPE_ROBE","INVTYPE_WAIST",
   "INVTYPE_LEGS","INVTYPE_FEET","INVTYPE_WRIST","INVTYPE_HAND")
 
@@ -109,13 +124,14 @@ local function Invalidate() generation = generation + 1 verdictCache = {} end
 ---------------------------------------------------------------------------
 -- Spec detection
 ---------------------------------------------------------------------------
--- returns index, isModernSpecAPI
+-- returns index, isModernSpecAPI, source ("manual" | "auto" | "default")
 local function DetectSpec()
+  local modern = GetSpecialization ~= nil
   local manual = CharData().spec
-  if manual then return manual, (GetSpecialization ~= nil) end
+  if manual then return manual, modern, "manual" end
   if GetSpecialization then
     local ok, i = pcall(GetSpecialization)
-    if ok and i then return i, true end
+    if ok and i then return i, true, "auto" end
   end
   if GetNumTalentTabs and GetTalentTabInfo then
     local best, bestPts = nil, 0
@@ -123,19 +139,22 @@ local function DetectSpec()
       local ok, _, _, pts = pcall(GetTalentTabInfo, i)
       if ok and type(pts) == "number" and pts > bestPts then best, bestPts = i, pts end
     end
-    if best then return best, false end
+    if best then return best, false, "auto" end
   end
+  -- No talent points yet (under level 10): assume the usual leveling spec
+  local def = DEFAULT_SPEC[PlayerClass()]
+  if def then return def, modern, "default" end
 end
 
 local specCache
 local function GetSpec()
   local class = PlayerClass()
-  local idx, modern = DetectSpec()
+  local idx, modern, source = DetectSpec()
   if not idx then return nil end
   local list = (class == "DRUID" and modern) and DRUID_MODERN or SPECS[class]
   local s = list and list[idx]
   if not s then return nil end
-  local key = class .. idx
+  local key = class .. idx .. source
   if specCache and specCache.key == key then return specCache.spec end
   local kind = KINDS[s[2]]
   local opts = s[3] or {}
@@ -143,7 +162,7 @@ local function GetSpec()
   for k, v in pairs(kind.w) do w[k] = v end
   if opts.w then for k, v in pairs(opts.w) do w[k] = v end end
   local spec = { name = s[1], kind = s[2], w = w, dpsW = kind.dpsW, rdps = kind.rdps,
-                 dagger = opts.dagger, twoHand = opts.twoHand }
+                 dagger = opts.dagger, twoHand = opts.twoHand, source = source }
   specCache = { key = key, spec = spec }
   return spec
 end
@@ -315,15 +334,41 @@ local function ItemScore(link, spec)
   return score * mult
 end
 
+local function SlotScore(slot, spec)
+  local l = GetInventoryItemLink("player", slot)
+  if not l then return 0 end
+  return ItemScore(l, spec) or 0
+end
+
+local function PlayerDualWields()
+  if CanDualWield then
+    local ok, can = pcall(CanDualWield)
+    if ok and can ~= nil then return can and true or false end
+  end
+  return DUAL_WIELD[PlayerClass()] or false
+end
+
+-- Off hand counts as a weapon slot only if it's empty or holds a weapon (not a shield / held item)
+local function OffHandIsWeaponSlot()
+  local l = GetInventoryItemLink("player", 17)
+  if not l then return true end
+  local _, _, _, _, _, classID = GetInstant(l)
+  return classID == 2
+end
+
 -- Score of what you currently wear in the slot(s) this item would replace (worst slot wins)
 local function EquippedScore(equipLoc, spec)
   local slots = SLOTS[equipLoc]
   if not slots then return nil end
+  -- A two-hander replaces main hand AND off hand
+  if equipLoc == "INVTYPE_2HWEAPON" then return SlotScore(16, spec) + SlotScore(17, spec) end
+  -- A one-hander only competes for the off hand if you can dual wield and aren't using a shield/held item
+  if equipLoc == "INVTYPE_WEAPON" and not (PlayerDualWields() and OffHandIsWeaponSlot()) then
+    slots = { 16 }
+  end
   local lowest
   for _, s in ipairs(slots) do
-    local l = GetInventoryItemLink("player", s)
-    local sc = 0
-    if l then sc = ItemScore(l, spec) or 0 end
+    local sc = SlotScore(s, spec)
     if not lowest or sc < lowest then lowest = sc end
   end
   return lowest
@@ -361,8 +406,13 @@ local function Evaluate(link)
   if id and cd.want[id] then return "NEED", "You marked this item as wanted" end
 
   -- 1. Can the class physically equip it?
-  if classID == 4 and BODY_SLOTS[equipLoc] and subID and subID > (ARMOR[class] or 1) then
+  local isBodyArmor = classID == 4 and BODY_SLOTS[equipLoc] and subID
+  if isBodyArmor and subID > (ARMOR[class] or 1) then
     return "PASS", "Your class can't wear this armor type"
+  end
+  local maxArmor = MaxArmor(class)
+  if isBodyArmor and subID > maxArmor then
+    return "GREED", "You can't wear " .. ARMOR_NAMES[subID] .. " until level " .. ARMOR_LEVEL
   end
   if classID == 4 and subID == 6 and not SHIELD[class] then return "PASS", "Your class can't use shields" end
   if classID == 2 and WEAPONS[class] and subID and not WEAPONS[class][subID] then
@@ -378,7 +428,7 @@ local function Evaluate(link)
   local spec = GetSpec()
   if not spec then return "GREED", "Couldn't detect your spec", "Use /needit spec <number> to set it" end
 
-  local lowerArmor = classID == 4 and BODY_SLOTS[equipLoc] and subID and subID > 0 and subID < (ARMOR[class] or 1)
+  local lowerArmor = isBodyArmor and subID > 0 and subID < maxArmor
 
   local score, good, wasted = ScoreItem(parsed, spec, equipLoc, classID, subID)
   local mult, note = WeaponPref(spec, equipLoc, classID, subID)
@@ -389,6 +439,7 @@ local function Evaluate(link)
   if #wasted > 0 then detail[#detail + 1] = "Wasted: " .. FormatWasted(wasted) end
   if note then detail[#detail + 1] = note end
   if equipLoc == "INVTYPE_TRINKET" then detail[#detail + 1] = "Trinket - read the effect too" end
+  if spec.source == "default" then detail[#detail + 1] = "No talents yet - assuming " .. spec.name end
   local detailText = #detail > 0 and table.concat(detail, "  |  ") or nil
 
   if score <= 0 then
@@ -571,8 +622,9 @@ local function Say(msg) print("|cff33ccffNeedIt:|r " .. msg) end
 
 local function Status()
   local spec = GetSpec()
+  local SOURCE = { manual = " (manual)", auto = " (auto)", default = " (no talents yet - leveling default)" }
   Say("Class " .. tostring(PlayerClass()) .. ", spec " .. (spec and spec.name or "unknown")
-      .. (CharData().spec and " (manual)" or " (auto)"))
+      .. (spec and SOURCE[spec.source] or ""))
 end
 
 local function Help()
@@ -636,6 +688,7 @@ f:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 f:RegisterEvent("PLAYER_TALENT_UPDATE")
 f:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
 f:RegisterEvent("CHARACTER_POINTS_CHANGED")
+f:RegisterEvent("PLAYER_LEVEL_UP")
 f:SetScript("OnEvent", function(_, event)
   if event == "PLAYER_LOGIN" then
     NeedItDB = NeedItDB or {}
