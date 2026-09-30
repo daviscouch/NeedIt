@@ -3,7 +3,6 @@
 -- upgrade comparison, markers on bag/vendor items and group-loot roll frames.
 NeedItDB = NeedItDB or {}
 
-local GetInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
 local GetInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
 local GetStats = (C_Item and C_Item.GetItemStats) or GetItemStats
 local GetBagLink = (C_Container and C_Container.GetContainerItemLink) or GetContainerItemLink
@@ -14,23 +13,25 @@ local function set(...) local t = {} for _, v in ipairs({...}) do t[v] = true en
 -- Data: what each role values. Weights are "worth per point" (attack power = 1).
 ---------------------------------------------------------------------------
 -- dpsW = weight of melee weapon DPS, rdps = weight of ranged/wand DPS.
+-- RAP (ranged-only attack power) and FAP (feral-form attack power) only count where listed.
 local KINDS = {
   MELEE_STR  = { dpsW = 4, rdps = 3, w = { STR=2, AGI=1, AP=1, CRIT=1.2, HIT=1.2, HASTE=1.2, STA=0.2 } },
   MELEE_AGI  = { dpsW = 4, rdps = 3, w = { AGI=2, STR=1, AP=1, CRIT=1.2, HIT=1.2, HASTE=1.2, STA=0.2 } },
-  RANGED_AGI = { dpsW = 0.5, rdps = 8, w = { AGI=2, AP=1, CRIT=1.2, HIT=1.2, HASTE=1.2, INT=0.5, MP5=0.3, STA=0.2 } },
+  RANGED_AGI = { dpsW = 0.5, rdps = 8, w = { AGI=2, AP=1, RAP=1, CRIT=1.2, HIT=1.2, HASTE=1.2, INT=0.5, MP5=0.3, STA=0.2 } },
   TANK_STR   = { dpsW = 2, rdps = 1, w = { STA=1.5, STR=1, AGI=1, DEF=1.5, DODGE=1.2, PARRY=1.2, BLOCK=0.8, HIT=1, CRIT=0.5, AP=0.3 } },
-  FERAL      = { dpsW = 0, rdps = 0, w = { STR=2, AGI=2, AP=1, STA=0.5, CRIT=1.2, HIT=1.2, HASTE=1.2, DODGE=0.5 } },
+  FERAL      = { dpsW = 0, rdps = 0, w = { STR=2, AGI=2, AP=1, FAP=1, STA=0.5, CRIT=1.2, HIT=1.2, HASTE=1.2, DODGE=0.5 } },
   CASTER     = { dpsW = 0, rdps = 2, w = { INT=1.5, SP=2.5, SPD=2.5, CRIT=1.2, HIT=1.5, HASTE=1.2, MP5=0.5, SPI=0.5, STA=0.3 } },
   HEALER     = { dpsW = 0, rdps = 2, w = { INT=1.5, SPI=1.2, HEAL=2.5, SP=2, MP5=1.5, CRIT=0.8, HASTE=1, STA=0.3 } },
 }
 
 -- Indexed by spec / talent-tree order: {name, kind, options}
--- options: w = weight overrides, dagger = "main"|"avoid", twoHand = "want"|"avoid"
+-- options: w = weight overrides, dagger = "main"|"avoid", twoHand = "want"|"avoid",
+--          alias = other name the client may use for the spec
 local SPECS = {
   WARRIOR = { {"Arms","MELEE_STR",{twoHand="want"}}, {"Fury","MELEE_STR"}, {"Protection","TANK_STR",{twoHand="avoid"}} },
   PALADIN = { {"Holy","HEALER"}, {"Protection","TANK_STR",{twoHand="avoid"}}, {"Retribution","MELEE_STR",{twoHand="want"}} },
   HUNTER  = { {"Beast Mastery","RANGED_AGI"}, {"Marksmanship","RANGED_AGI"}, {"Survival","RANGED_AGI"} },
-  ROGUE   = { {"Assassination","MELEE_AGI",{dagger="main"}}, {"Combat","MELEE_AGI",{dagger="avoid"}}, {"Subtlety","MELEE_AGI",{dagger="main"}} },
+  ROGUE   = { {"Assassination","MELEE_AGI",{dagger="main"}}, {"Combat","MELEE_AGI",{dagger="avoid",alias="outlaw"}}, {"Subtlety","MELEE_AGI",{dagger="main"}} },
   PRIEST  = { {"Discipline","HEALER"}, {"Holy","HEALER"}, {"Shadow","CASTER",{w={SPI=0.8}}} },
   SHAMAN  = { {"Elemental","CASTER"}, {"Enhancement","MELEE_AGI",{w={STR=2,AGI=1.5}}}, {"Restoration","HEALER"} },
   MAGE    = { {"Arcane","CASTER"}, {"Fire","CASTER"}, {"Frost","CASTER"} },
@@ -65,7 +66,7 @@ local WEAPONS = {
   WARRIOR = set(0,1,2,3,4,5,6,7,8,10,13,15,16,18),
   PALADIN = set(0,1,4,5,6,7,8),
   HUNTER  = set(0,1,2,3,6,7,8,10,13,15,16,18),
-  ROGUE   = set(0,2,3,4,7,13,15,16,18),
+  ROGUE   = set(2,3,4,7,13,15,16,18),   -- no axes in Classic (added in patch 3.2)
   PRIEST  = set(4,10,15,19),
   SHAMAN  = set(0,1,4,5,10,13,15),
   MAGE    = set(7,10,15,19),
@@ -73,6 +74,8 @@ local WEAPONS = {
   DRUID   = set(4,5,10,13,15),
 }
 local SHIELD = set("WARRIOR","PALADIN","SHAMAN")
+-- Relic armor subclass -> the only class that can use it
+local RELIC = { [7] = { "PALADIN", "Librams" }, [8] = { "DRUID", "Idols" }, [9] = { "SHAMAN", "Totems" } }
 local RANGED_SUB = set(2,3,16,18,19)
 
 local SLOTS = {
@@ -85,7 +88,7 @@ local SLOTS = {
 }
 
 local NAMES = { STR="Strength", AGI="Agility", INT="Intellect", SPI="Spirit", STA="Stamina",
-  AP="Attack Power", SP="Spell Power", SPD="Spell Damage", HEAL="Healing", CRIT="Crit", HIT="Hit",
+  AP="Attack Power", RAP="Ranged Attack Power", FAP="Feral Attack Power", SP="Spell Power", SPD="Spell Damage", HEAL="Healing", CRIT="Crit", HIT="Hit",
   HASTE="Haste", MP5="MP5", DEF="Defense", DODGE="Dodge", PARRY="Parry", BLOCK="Block" }
 
 local PCT_MULT = 14       -- "+1% crit" is treated as roughly 14 rating points
@@ -117,44 +120,85 @@ local function Opt(name)
   return NeedItDB[name]
 end
 
-local generation = 0
 local verdictCache = {}
-local function Invalidate() generation = generation + 1 verdictCache = {} end
+local function Invalidate() verdictCache = {} end
 
 ---------------------------------------------------------------------------
 -- Spec detection
+-- WoW Forever runs Classic content on the modern client API, so this tries both
+-- the modern spec API and Classic talent trees, matching by spec name first
+-- (works whatever order the client uses) and by position second.
 ---------------------------------------------------------------------------
--- returns index, isModernSpecAPI, source ("manual" | "auto" | "default")
+-- The numbered list /needit spec uses (Druids get 4 specs only on a 4-spec client)
+local function SpecList(class)
+  if class == "DRUID" and GetNumSpecializations then
+    local ok, n = pcall(GetNumSpecializations)
+    if ok and n == 4 then return DRUID_MODERN end
+  end
+  return SPECS[class]
+end
+
+local function SpecByName(class, name)
+  if type(name) ~= "string" or name == "" then return end
+  name = name:lower()
+  for _, list in ipairs({ SPECS[class] or {}, class == "DRUID" and DRUID_MODERN or {} }) do
+    for _, s in ipairs(list) do
+      local alias = s[3] and s[3].alias
+      if name:find(s[1]:lower(), 1, true) or (alias and name:find(alias, 1, true)) then return s end
+    end
+  end
+end
+
+-- GetTalentTabInfo's returns differ by client: (name, icon, points) or (id, name, desc, icon, points)
+local function TalentTab(i)
+  local r = { pcall(GetTalentTabInfo, i) }
+  if not r[1] then return end
+  if type(r[2]) == "string" then return r[2], r[4] end
+  return r[3], r[6]
+end
+
+-- returns spec entry {name, kind, opts}, source ("manual" | "auto" | "default")
 local function DetectSpec()
-  local modern = GetSpecialization ~= nil
+  local class = PlayerClass()
+  local list = SpecList(class)
+  if not list then return end
   local manual = CharData().spec
-  if manual then return manual, modern, "manual" end
+  if manual and list[manual] then return list[manual], "manual" end
   if GetSpecialization then
     local ok, i = pcall(GetSpecialization)
-    if ok and i then return i, true, "auto" end
+    if ok and type(i) == "number" and i > 0 then
+      local name
+      if GetSpecializationInfo then
+        local ok2, _, n = pcall(GetSpecializationInfo, i)
+        if ok2 then name = n end
+      end
+      local s = SpecByName(class, name) or list[i]
+      if s then return s, "auto" end
+    end
   end
   if GetNumTalentTabs and GetTalentTabInfo then
-    local best, bestPts = nil, 0
-    for i = 1, GetNumTalentTabs() do
-      local ok, _, _, pts = pcall(GetTalentTabInfo, i)
-      if ok and type(pts) == "number" and pts > bestPts then best, bestPts = i, pts end
+    local okN, tabs = pcall(GetNumTalentTabs)
+    local best, bestName, bestPts = nil, nil, 0
+    for i = 1, (okN and tonumber(tabs)) or 0 do
+      local name, pts = TalentTab(i)
+      if type(pts) == "number" and pts > bestPts then best, bestName, bestPts = i, name, pts end
     end
-    if best then return best, false, "auto" end
+    if best then
+      local s = SpecByName(class, bestName) or (SPECS[class] or {})[best]
+      if s then return s, "auto" end
+    end
   end
   -- No talent points yet (under level 10): assume the usual leveling spec
-  local def = DEFAULT_SPEC[PlayerClass()]
-  if def then return def, modern, "default" end
+  local def = DEFAULT_SPEC[class] and SPECS[class][DEFAULT_SPEC[class]]
+  if def then return def, "default" end
 end
 
 local specCache
 local function GetSpec()
   local class = PlayerClass()
-  local idx, modern, source = DetectSpec()
-  if not idx then return nil end
-  local list = (class == "DRUID" and modern) and DRUID_MODERN or SPECS[class]
-  local s = list and list[idx]
+  local s, source = DetectSpec()
   if not s then return nil end
-  local key = class .. idx .. source
+  local key = class .. s[1] .. source
   if specCache and specCache.key == key then return specCache.spec end
   local kind = KINDS[s[2]]
   local opts = s[3] or {}
@@ -177,6 +221,8 @@ local function ClassifyKey(k)
   if k:find("INTELLECT") then return "INT" end
   if k:find("SPIRIT") then return "SPI" end
   if k:find("STAMINA") then return "STA" end
+  if k:find("FERAL_ATTACK_POWER") then return "FAP" end
+  if k:find("RANGED_ATTACK_POWER") then return "RAP" end
   if k:find("ATTACK_POWER") then return "AP" end
   if k:find("HEALING") then return "HEAL" end
   if k:find("SPELL_POWER") then return "SP" end
@@ -199,6 +245,13 @@ local PLUS_PHRASES = {
   { "mana per 5", "MP5" }, { "mp5", "MP5" },
 }
 
+-- "attack power" text can mean ranged-only or feral-forms-only attack power
+local function APKind(l)
+  if l:find("ranged attack power") then return "RAP" end
+  if l:find("forms only") or l:find("cat, bear") then return "FAP" end
+  return "AP"
+end
+
 local function Put(vals, stat, v)
   if stat and v and v > (vals[stat] or 0) then vals[stat] = v end
 end
@@ -208,7 +261,11 @@ local function ParseLine(text, vals)
   local num, phrase = l:match("^%+(%d+)%s+(.+)$")
   if num then
     for _, p in ipairs(PLUS_PHRASES) do
-      if phrase:find(p[1], 1, true) then Put(vals, p[2], tonumber(num)) break end
+      if phrase:find(p[1], 1, true) then
+        local stat = p[2] == "AP" and APKind(phrase) or p[2]
+        Put(vals, stat, tonumber(num))
+        break
+      end
     end
     return
   end
@@ -224,7 +281,7 @@ local function ParseLine(text, vals)
     if pct and PCT_STATS[stat] then return n * PCT_MULT end
     return n
   end
-  if l:find("attack power") then Put(vals, "AP", val("AP")) end
+  if l:find("attack power") then Put(vals, APKind(l), val("AP")) end
   if l:find("damage and healing") then Put(vals, "SP", val("SP"))
   elseif l:find("healing") then Put(vals, "HEAL", val("HEAL"))
   elseif l:find("spell damage") or l:find("damage done by") or l:find("spell power") then Put(vals, "SPD", val("SPD")) end
@@ -241,18 +298,41 @@ end
 local scanTip
 local parsedCache = {}
 
--- returns { vals = {STAT=value}, dps = number, classLine = string|nil } or nil if item data isn't loaded yet
-local function ParseItem(link)
-  if parsedCache[link] then return parsedCache[link] end
+-- Tooltip text lines for an item (skipping the name), or nil if the item isn't loaded yet.
+-- Modern clients (incl. WoW Forever) expose C_TooltipInfo; older ones need a hidden tooltip.
+local function TooltipLines(link)
+  local lines = {}
+  if C_TooltipInfo and C_TooltipInfo.GetHyperlink then
+    local ok, data = pcall(C_TooltipInfo.GetHyperlink, link)
+    if ok and type(data) == "table" and type(data.lines) == "table" then
+      for i = 2, #data.lines do
+        local t = data.lines[i].leftText
+        if type(t) == "string" then lines[#lines + 1] = t end
+      end
+      if #data.lines >= 2 then return lines end
+    end
+  end
   if not scanTip then
     scanTip = CreateFrame("GameTooltip", "NeedItScanTip", UIParent, "GameTooltipTemplate")
   end
   scanTip:SetOwner(UIParent, "ANCHOR_NONE")
   scanTip:ClearLines()
-  local ok = pcall(scanTip.SetHyperlink, scanTip, link)
-  if not ok then return nil end
+  if not pcall(scanTip.SetHyperlink, scanTip, link) then return nil end
   local n = scanTip:NumLines()
   if not n or n < 2 then return nil end
+  for i = 2, n do
+    local fs = _G["NeedItScanTipTextLeft" .. i]
+    local text = fs and fs:GetText()
+    if type(text) == "string" then lines[#lines + 1] = text end
+  end
+  return lines
+end
+
+-- returns { vals = {STAT=value}, dps = number, classLine = string|nil } or nil if item data isn't loaded yet
+local function ParseItem(link)
+  if parsedCache[link] then return parsedCache[link] end
+  local lines = TooltipLines(link)
+  if not lines then return nil end
 
   local vals, dps, classLine = {}, 0, nil
   if GetStats then
@@ -264,15 +344,11 @@ local function ParseItem(link)
       end
     end
   end
-  for i = 2, n do
-    local fs = _G["NeedItScanTipTextLeft" .. i]
-    local text = fs and fs:GetText()
-    if type(text) == "string" then
-      ParseLine(text, vals)
-      local d = text:lower():match("([%d%.]+)%s+damage per second")
-      if d then dps = tonumber(d) or dps end
-      if text:find("^Classes:") then classLine = text:upper() end
-    end
+  for _, text in ipairs(lines) do
+    ParseLine(text, vals)
+    local d = text:lower():match("([%d%.]+)%s+damage per second")
+    if d then dps = tonumber(d) or dps end
+    if text:find("^Classes:") then classLine = text:upper() end
   end
   local parsed = { vals = vals, dps = dps, classLine = classLine }
   parsedCache[link] = parsed
@@ -415,6 +491,8 @@ local function Evaluate(link)
     return "GREED", "You can't wear " .. ARMOR_NAMES[subID] .. " until level " .. ARMOR_LEVEL
   end
   if classID == 4 and subID == 6 and not SHIELD[class] then return "PASS", "Your class can't use shields" end
+  local relic = classID == 4 and RELIC[subID]
+  if relic and relic[1] ~= class then return "PASS", relic[2] .. " are for another class" end
   if classID == 2 and WEAPONS[class] and subID and not WEAPONS[class][subID] then
     return "PASS", "Your class can't use this weapon type"
   end
@@ -489,6 +567,14 @@ local function Annotate(tt, link)
   tt:Show()
 end
 
+local function TooltipLink(tt, data)
+  if tt.GetItem then
+    local ok, _, link = pcall(tt.GetItem, tt)
+    if ok and link then return link end
+  end
+  return data and (data.hyperlink or (data.id and ("item:" .. data.id)))
+end
+
 local function SetupTooltips()
   local tips = { GameTooltip, ItemRefTooltip }
   for _, t in ipairs(tips) do
@@ -496,16 +582,12 @@ local function SetupTooltips()
   end
   if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, function(tt, data)
-      local link = data and (data.hyperlink or (data.id and ("item:" .. data.id)))
-      Annotate(tt, link)
+      Annotate(tt, TooltipLink(tt, data))
     end)
   else
     for _, t in ipairs(tips) do
       if t and t.HookScript then
-        t:HookScript("OnTooltipSetItem", function(self)
-          local _, link = self:GetItem()
-          Annotate(self, link)
-        end)
+        t:HookScript("OnTooltipSetItem", function(self) Annotate(self, TooltipLink(self)) end)
       end
     end
   end
@@ -533,9 +615,15 @@ local function SetMark(btn, verdict)
   m:Show()
 end
 
-local function EachBagButton(fn)
+local BAG_FRAMES = {}
+for i = 1, 13 do BAG_FRAMES[#BAG_FRAMES + 1] = "ContainerFrame" .. i end
+BAG_FRAMES[#BAG_FRAMES + 1] = "ContainerFrameCombinedBags"
+
+-- includeHidden: also visit closed bags (used to clear markers)
+local function EachBagButton(fn, includeHidden)
   local function try(frame)
-    if not frame or not frame.IsShown or not frame:IsShown() then return end
+    if not frame or not frame.IsShown then return end
+    if not includeHidden and not frame:IsShown() then return end
     if frame.EnumerateValidItems then
       for _, b in frame:EnumerateValidItems() do
         fn(b, (b.GetBagID and b:GetBagID()) or frame:GetID(), b:GetID())
@@ -549,8 +637,7 @@ local function EachBagButton(fn)
       end
     end
   end
-  for i = 1, 13 do try(_G["ContainerFrame" .. i]) end
-  try(_G.ContainerFrameCombinedBags)
+  for _, name in ipairs(BAG_FRAMES) do try(_G[name]) end
 end
 
 local function RefreshBags()
@@ -562,20 +649,35 @@ local function RefreshBags()
   end)
 end
 
+local function EachMerchantButton(fn)
+  for i = 1, (MERCHANT_ITEMS_PER_PAGE or 10) do
+    local btn = _G["MerchantItem" .. i .. "ItemButton"]
+    if btn then fn(btn, i) end
+  end
+end
+
 local function RefreshMerchant()
   if not (MerchantFrame and MerchantFrame:IsShown() and GetMerchantItemLink) then return end
   local per = MERCHANT_ITEMS_PER_PAGE or 10
-  for i = 1, per do
-    local btn = _G["MerchantItem" .. i .. "ItemButton"]
-    if btn then
-      local verdict
-      if btn:IsVisible() then
-        local idx = ((MerchantFrame.page or 1) - 1) * per + i
-        local link = GetMerchantItemLink(idx)
-        if link then verdict = CachedVerdict(link) end
-      end
-      SetMark(btn, verdict)
+  -- Tab 2 is buyback, where the buttons don't map to merchant item indexes
+  local buying = (MerchantFrame.selectedTab or 1) == 1
+  EachMerchantButton(function(btn, i)
+    local verdict
+    if buying and btn:IsVisible() then
+      local link = GetMerchantItemLink(((MerchantFrame.page or 1) - 1) * per + i)
+      if link then verdict = CachedVerdict(link) end
     end
+    SetMark(btn, verdict)
+  end)
+end
+
+-- Classic names its roll frames GroupLootFrame1-4; modern clients may pool them in GroupLootContainer
+local function EachRollFrame(fn)
+  local seen = {}
+  local function visit(fr) if fr and not seen[fr] then seen[fr] = true fn(fr) end end
+  for i = 1, (NUM_GROUP_LOOT_FRAMES or 4) do visit(_G["GroupLootFrame" .. i]) end
+  if GroupLootContainer and type(GroupLootContainer.rollFrames) == "table" then
+    for _, fr in pairs(GroupLootContainer.rollFrames) do if type(fr) == "table" then visit(fr) end end
   end
 end
 
@@ -583,36 +685,61 @@ local ROLL_TEXT = { NEED = "Roll NEED", GREED = "Roll GREED", PASS = "PASS" }
 
 local function RefreshRolls()
   if not GetLootRollItemLink then return end
-  for i = 1, 4 do
-    local f = _G["GroupLootFrame" .. i]
-    if f then
-      local fs = f.needitText
-      if f:IsShown() and f.rollID then
-        local link = GetLootRollItemLink(f.rollID)
-        local verdict, headline
-        if link then verdict, headline = CachedVerdict(link) end
-        if verdict then
-          if not fs then
-            fs = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            fs:SetPoint("BOTTOM", f, "TOP", 0, 2)
-            f.needitText = fs
-          end
-          fs:SetText(COLORS[verdict] .. "NeedIt: " .. ROLL_TEXT[verdict] .. "|r " .. COLORS.GRAY .. (headline or "") .. "|r")
-          fs:Show()
-        elseif fs then
-          fs:Hide()
-        end
-      elseif fs then
-        fs:Hide()
-      end
+  EachRollFrame(function(fr)
+    local fs = fr.needitText
+    local verdict, headline
+    if fr:IsShown() and fr.rollID then
+      local link = GetLootRollItemLink(fr.rollID)
+      if link then verdict, headline = CachedVerdict(link) end
     end
-  end
+    if verdict then
+      if not fs then
+        fs = fr:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        fs:SetPoint("BOTTOM", fr, "TOP", 0, 2)
+        fr.needitText = fs
+      end
+      fs:SetText(COLORS[verdict] .. "NeedIt: " .. ROLL_TEXT[verdict] .. "|r " .. COLORS.GRAY .. (headline or "") .. "|r")
+      fs:Show()
+    elseif fs then
+      fs:Hide()
+    end
+  end)
+end
+
+local function ClearMarkers(name)
+  if name == "bags" then EachBagButton(function(btn) SetMark(btn, nil) end, true)
+  elseif name == "vendor" then EachMerchantButton(function(btn) SetMark(btn, nil) end)
+  elseif name == "rolls" then EachRollFrame(function(fr) if fr.needitText then fr.needitText:Hide() end end) end
 end
 
 local function RefreshAll()
   if Opt("bags") then pcall(RefreshBags) end
   if Opt("vendor") then pcall(RefreshMerchant) end
   if Opt("rolls") then pcall(RefreshRolls) end
+end
+
+-- Coalesce bursts of events (e.g. many BAG_UPDATEs) into one refresh a moment later,
+-- after Blizzard's own frames have finished updating.
+local refreshPending = false
+local function RequestRefresh()
+  if refreshPending then return end
+  refreshPending = true
+  local function run() refreshPending = false RefreshAll() end
+  if C_Timer and C_Timer.After then C_Timer.After(0.1, run) else run() end
+end
+
+local function HookRefreshes()
+  for _, name in ipairs(BAG_FRAMES) do
+    local fr = _G[name]
+    if fr and fr.HookScript then pcall(fr.HookScript, fr, "OnShow", RequestRefresh) end
+  end
+  if MerchantFrame and MerchantFrame.HookScript then pcall(MerchantFrame.HookScript, MerchantFrame, "OnShow", RequestRefresh) end
+  EachRollFrame(function(fr) if fr.HookScript then pcall(fr.HookScript, fr, "OnShow", RequestRefresh) end end)
+  if hooksecurefunc then
+    for _, fn in ipairs({ "MerchantFrame_Update", "ContainerFrame_Update", "GroupLootFrame_OpenNewFrame" }) do
+      if _G[fn] then pcall(hooksecurefunc, fn, RequestRefresh) end
+    end
+  end
 end
 
 ---------------------------------------------------------------------------
@@ -627,22 +754,74 @@ local function Status()
       .. (spec and SOURCE[spec.source] or ""))
 end
 
+local function SpecChoices()
+  local out = {}
+  for i, s in ipairs(SpecList(PlayerClass()) or {}) do out[#out + 1] = i .. " = " .. s[1] end
+  return table.concat(out, ", ")
+end
+
 local function Help()
   Say("/needit - show detected class and spec")
-  Say("/needit spec <number>  |  /needit spec auto - set or reset your spec")
+  Say("/needit spec <number>  |  /needit spec auto - set or reset your spec (" .. SpecChoices() .. ")")
   Say("/needit ignore [item link]  |  /needit unignore [item link] - always PASS an item")
   Say("/needit want [item link]  |  /needit unwant [item link] - always NEED an item")
   Say("/needit bags|vendor|rolls - turn markers on/off")
+  Say("/needit debug - show what NeedIt detects on this client (useful for bug reports)")
   Say("Bag markers: green = NEED, red = PASS.")
+end
+
+local function Debug()
+  local version, build, _, toc = GetBuildInfo()
+  Say("Client " .. tostring(version) .. " (" .. tostring(build) .. "), interface " .. tostring(toc))
+  Say("Level " .. tostring(UnitLevel("player")) .. " " .. tostring(PlayerClass())
+      .. ", max armor now: " .. tostring(ARMOR_NAMES[MaxArmor(PlayerClass())])
+      .. ", dual wield: " .. tostring(PlayerDualWields()))
+  if GetSpecialization then
+    local ok, i = pcall(GetSpecialization)
+    local name
+    if ok and i and GetSpecializationInfo then local ok2, _, n = pcall(GetSpecializationInfo, i) if ok2 then name = n end end
+    Say("Spec API: GetSpecialization() = " .. tostring(ok and i) .. " (" .. tostring(name) .. ")")
+  else
+    Say("Spec API: none")
+  end
+  if GetNumTalentTabs and GetTalentTabInfo then
+    local ok, n = pcall(GetNumTalentTabs)
+    local tabs = {}
+    for i = 1, (ok and tonumber(n)) or 0 do
+      local name, pts = TalentTab(i)
+      tabs[#tabs + 1] = tostring(name) .. " " .. tostring(pts)
+    end
+    Say("Talent trees: " .. (#tabs > 0 and table.concat(tabs, ", ") or "none"))
+  else
+    Say("Talent trees: API missing")
+  end
+  Status()
+  Say("Tooltip data API: " .. ((C_TooltipInfo and "yes") or "no") .. ", tooltip hooks: "
+      .. ((TooltipDataProcessor and "modern") or "classic"))
+end
+
+local function HandleSpec(cd, rest)
+  local r = rest:lower()
+  local n = tonumber(r)
+  if r == "auto" then
+    cd.spec = nil
+  elseif n and (SpecList(PlayerClass()) or {})[n] then
+    cd.spec = n
+  else
+    if r ~= "" then Say("Unknown spec '" .. rest .. "'.") end
+    Say("Specs: " .. SpecChoices() .. ". Use /needit spec <number> or /needit spec auto.")
+    return
+  end
+  specCache = nil
+  Invalidate()
+  RequestRefresh()
+  Status()
 end
 
 local function ToggleOpt(name)
   NeedItDB[name] = not Opt(name)
   Say(name .. " markers " .. (NeedItDB[name] and "on" or "off"))
-  if not NeedItDB[name] then
-    -- hide leftover markers
-    EachBagButton(function(btn) SetMark(btn, nil) end)
-  end
+  if NeedItDB[name] then RequestRefresh() else ClearMarkers(name) end
 end
 
 SLASH_NEEDIT1 = "/needit"
@@ -652,10 +831,7 @@ SlashCmdList["NEEDIT"] = function(msg)
   cmd = cmd:lower()
   local cd = CharData()
   if cmd == "spec" then
-    cd.spec = tonumber(rest)
-    specCache = nil
-    Invalidate()
-    Status()
+    HandleSpec(cd, rest)
   elseif cmd == "ignore" or cmd == "unignore" or cmd == "want" or cmd == "unwant" then
     local id = ItemID(rest)
     if not id then Say("Shift-click an item after the command to add its link.") return end
@@ -668,9 +844,12 @@ SlashCmdList["NEEDIT"] = function(msg)
       list[id] = nil
     end
     Invalidate()
+    RequestRefresh()
     Say(rest .. " - " .. cmd .. " saved.")
   elseif cmd == "bags" or cmd == "vendor" or cmd == "rolls" then
     ToggleOpt(cmd)
+  elseif cmd == "debug" then
+    Debug()
   elseif cmd == "help" or cmd == "?" then
     Help()
   else
@@ -680,30 +859,37 @@ SlashCmdList["NEEDIT"] = function(msg)
 end
 
 ---------------------------------------------------------------------------
--- Startup
+-- Startup + events (markers refresh on events instead of polling)
 ---------------------------------------------------------------------------
+-- Things that change which verdict an item gets
+local INVALIDATE = set("PLAYER_EQUIPMENT_CHANGED", "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED",
+  "CHARACTER_POINTS_CHANGED", "PLAYER_LEVEL_UP", "PLAYER_SPECIALIZATION_CHANGED", "TRAIT_CONFIG_UPDATED")
+-- Things that change what's on screen (or finish loading item data we were waiting for)
+local REFRESH = set("BAG_UPDATE", "BAG_UPDATE_DELAYED", "MERCHANT_SHOW", "MERCHANT_UPDATE",
+  "START_LOOT_ROLL", "GET_ITEM_INFO_RECEIVED")
+
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
-f:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
-f:RegisterEvent("PLAYER_TALENT_UPDATE")
-f:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
-f:RegisterEvent("CHARACTER_POINTS_CHANGED")
-f:RegisterEvent("PLAYER_LEVEL_UP")
+-- pcall: not every client has every event, and registering an unknown one errors
+for ev in pairs(INVALIDATE) do pcall(f.RegisterEvent, f, ev) end
+for ev in pairs(REFRESH) do pcall(f.RegisterEvent, f, ev) end
+
 f:SetScript("OnEvent", function(_, event)
   if event == "PLAYER_LOGIN" then
     NeedItDB = NeedItDB or {}
     SetupTooltips()
+    HookRefreshes()
     Say("loaded. Hover gear to see NEED / GREED / PASS. Type /needit help.")
-  else
+    RequestRefresh()
+  elseif INVALIDATE[event] then
     specCache = nil
     Invalidate()
+    RequestRefresh()
+    if event == "PLAYER_LEVEL_UP" and C_Timer and C_Timer.After then
+      -- UnitLevel() can still report the old level while this event fires
+      C_Timer.After(1, function() Invalidate() RequestRefresh() end)
+    end
+  else
+    RequestRefresh()
   end
-end)
-
-local elapsed = 0
-f:SetScript("OnUpdate", function(_, dt)
-  elapsed = elapsed + dt
-  if elapsed < 0.5 then return end
-  elapsed = 0
-  RefreshAll()
 end)
